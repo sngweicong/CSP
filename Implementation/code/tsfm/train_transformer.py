@@ -89,17 +89,18 @@ class Classify11(nn.Module):
         self.dropout2 = nn.Dropout(0.2)
 
     def forward(self, src):
-        self.mask = get_pad_mask11(src).bool()  # [batch, edge_num,4]
+        firstmask = get_pad_mask11(src).bool().cuda()  # [batch, edge_num,4]
         mask = get_pad_mask(src, self.padding_idx).view(src.size(0), -1).unsqueeze(-1)
         #print(mask)
         output = self.embedding(src)  # [batch, k, d_model=512]
         for i in range(self.N):
             output = self.layers[i](output, mask)
         output = self.ll1(output)  # [batch, max_len2, edge_num]
-       # output = self.dropout1(output)
+        #output = self.dropout1(output)
+        #
         output = output.permute(0, 2, 1)  # [batch, edge_num, max_len2]
         output = self.ll2(output)  # [batch, edge_num, 4]
-        output = output.masked_fill(self.mask,-1e9)
+        output = output.masked_fill(firstmask,-1e9)
         output = F.log_softmax(output, dim=-1)
         return output  # [batch, edge_num=3, bond=4]
 # transformer with edge pos
@@ -249,6 +250,8 @@ def accuracy(preds_bond,label_graph,vertex):
 # model
 # model = Classify12(padding_idx)
 model = Classify11(padding_idx)
+torch.cuda.set_device(0)
+model.cuda()
 optimizer = optim.SGD(model.parameters(), lr=0.01, momentum=0.8)
 criterion = nn.NLLLoss(ignore_index=padding_idx)  # CrossEntropyLoss()
 
@@ -288,9 +291,9 @@ def train11(model, epoch, num):
         #print('seq_len', seq_len)
         #print('vertex_data', vertex_data[i:i + seq_len])
         #print('msp_arr', msp_arr_data[i:i + seq_len])
-        src = getInput11(vertex_data[i:i + seq_len], msp_arr_data[i:i + seq_len])
+        src = getInput11(vertex_data[i:i + seq_len], msp_arr_data[i:i + seq_len]).cuda()
         #print('src',src)
-        labels = getLabel(mol_adj_data[i:i + seq_len], vertex_data[i:i + seq_len])
+        labels = getLabel(mol_adj_data[i:i + seq_len], vertex_data[i:i + seq_len]).cuda()
         #print('labels',labels)
         labels_graph = mol_adj_data[i:i + seq_len]
         #print('labels_graph',labels_graph)
@@ -327,9 +330,9 @@ def evaluate11(model, epoch, num):
             #print("Eval", i)
             start_time = time.time()
             seq_len = min(batch_size, len(num) - i)
-            src = getInput11(vertex_data[i:i + seq_len], msp_arr_data[i:i + seq_len])
+            src = getInput11(vertex_data[i:i + seq_len], msp_arr_data[i:i + seq_len]).cuda()
             #print("1. getinput11 time", time.time()-start_time)
-            labels = getLabel(mol_adj_data[i:i + seq_len], vertex_data[i:i + seq_len])
+            labels = getLabel(mol_adj_data[i:i + seq_len], vertex_data[i:i + seq_len]).cuda()
             labels_graph = mol_adj_data[i:i + seq_len]
             #print(labels_graph)
             #print(labels_graph.shape)
@@ -370,8 +373,8 @@ def test11(model, epoch, num):
     with torch.no_grad():
         for i in range(0, len(num), batch_size):
             seq_len = min(batch_size, len(num) - i)
-            src = getInput11(vertex_data[i:i + seq_len], msp_arr_data[i:i + seq_len])
-            labels = getLabel(mol_adj_data[i:i + seq_len], vertex_data[i:i + seq_len])
+            src = getInput11(vertex_data[i:i + seq_len], msp_arr_data[i:i + seq_len]).cuda()
+            labels = getLabel(mol_adj_data[i:i + seq_len], vertex_data[i:i + seq_len]).cuda()
             labels_graph = mol_adj_data[i:i + seq_len]
             preds = model(src)  # batch, 3, 4
             preds_bond = torch.argmax(preds, dim=-1)  # batch 3
