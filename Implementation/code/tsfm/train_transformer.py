@@ -4,11 +4,12 @@ import torch.optim as optim
 import torch.nn as nn
 import torch.nn.functional as F
 import copy
-from tsfm.Layers import EncoderLayer #,DecoderLayer
-from tsfm.Sublayers import Norm
-from tsfm.Embed import PositionalEncoder
+from Layers import EncoderLayer #,DecoderLayer
+from Sublayers import Norm
+from Embed import PositionalEncoder
 import matplotlib.pyplot as plt
-import tsfm.getInput as getInput
+import getInput as getInput
+import time
 
 vertex_arr = np.load("../tsfm/vertex_arr_test.npy", allow_pickle=True) #1843
 mol_adj_arr = np.load("../tsfm/mol_adj_arr_test.npy", allow_pickle=True)
@@ -24,11 +25,12 @@ atom_mass = [12, 1, 16, 14]  # [12,1,16]
 atomic_number = [[1, 0, 0], [0, 0, 0], [0, 1, 0], [0, 0, 1]]  # [C, H, O, N}
 bond_number = [4, 1, 2]  # [C, H, O]
 default_valence = [[1, 1, 1], [1, 0, 0], [1, 1, 0], [1, 1, 1]]
+MSP_THRESHOLD = 100
 
 edge_num = 78  # 3#29*15#78 #3
 d_model = 256
 max_atoms = 13  # 3
-max_len11 = 15 * edge_num + k
+max_len11 = 15 * edge_num + 16
 max_len12 = 2 * edge_num + k
 
 def countH(h_num):
@@ -87,8 +89,9 @@ class Classify11(nn.Module):
         self.dropout2 = nn.Dropout(0.2)
 
     def forward(self, src):
-        self.mask = get_pad_mask11(src)  # [batch, edge_num,4]
+        self.mask = get_pad_mask11(src).bool()  # [batch, edge_num,4]
         mask = get_pad_mask(src, self.padding_idx).view(src.size(0), -1).unsqueeze(-1)
+        #print(mask)
         output = self.embedding(src)  # [batch, k, d_model=512]
         for i in range(self.N):
             output = self.layers[i](output, mask)
@@ -164,15 +167,32 @@ def getInput11(vertex, msp):
         for i in range(max_atoms):
             for ii in range(i + 1, max_atoms):
                 if i < len(vertex[b]) and ii < len(vertex[b]):
+                    #print(i,ii,idx1)
+                    #print("first",src[b, idx1 * 15: idx1 * 15 + 15])
                     src[b, idx1 * 15], src[b, idx1 * 15 + 1] = atom_mass[int(vertex[b][i])], atom_mass[int(vertex[b][ii])]
-                    src[b, idx1 * 15: idx1 * 15 + len(vertex[b])] = torch.LongTensor([int(jj==i or jj==ii) for jj in range(len(vertex[b]))])
+                    #print("second",src[b, idx1 * 15: idx1 * 15 + 15])
+                    src[b, idx1 * 15 + 2: idx1 * 15 + 2 + len(vertex[b])] = torch.LongTensor([int(jj==i or jj==ii) for jj in range(len(vertex[b]))])
+                    #print("third",src[b, idx1 * 15: idx1 * 15 + 15])
                 idx1 += 1
         idx = 15 * edge_num
-        for j in range(1, len(msp[b]) - 1):
-            if msp[b][j - 1] < msp[b][j] and msp[b][j + 1] < msp[b][j]:
-                src[b, idx] = j
-                idx += 1
-                if idx == max_len11: break
+        #print('before',src[b,15 * edge_num:])
+        #print(msp[b])
+        top16_unfiltered = (-msp[b]).argsort()[:16]
+        more_than_10_bool = (msp[b]>= MSP_THRESHOLD)
+        end_idx = 15
+        for i in range(1,16,1):
+            if not more_than_10_bool[top16_unfiltered[i]]:
+                end_idx = i
+                break
+        #print(top16_unfiltered[:end_idx])    
+        src[b,15 * edge_num: 15*edge_num+end_idx] = torch.Tensor(top16_unfiltered[:end_idx])
+        #print(src[b,15 * edge_num:])
+        # for j in range(1, len(msp[b]) - 1):
+        #     if msp[b][j - 1] < msp[b][j] and msp[b][j + 1] < msp[b][j]:
+        #         src[b, idx] = j
+        #         idx += 1
+        #         if idx == max_len11: break
+        #print('after',src[b,15 * edge_num:])
     return src
 #with decoder
 def getInput13(vertex, msp): #transformer without positional encoding
@@ -263,12 +283,21 @@ def train11(model, epoch, num):
     accs = []
 
     for batch, i in enumerate(range(0, len(num), batch_size)):
+        #print("batch,i", batch, i)
         seq_len = min(batch_size, len(num) - i)
+        #print('seq_len', seq_len)
+        #print('vertex_data', vertex_data[i:i + seq_len])
+        #print('msp_arr', msp_arr_data[i:i + seq_len])
         src = getInput11(vertex_data[i:i + seq_len], msp_arr_data[i:i + seq_len])
+        #print('src',src)
         labels = getLabel(mol_adj_data[i:i + seq_len], vertex_data[i:i + seq_len])
+        #print('labels',labels)
         labels_graph = mol_adj_data[i:i + seq_len]
+        #print('labels_graph',labels_graph)
         preds = model(src)  # batch, edge_num, 4
+        #print(preds)
         preds_bond = torch.argmax(preds, dim=-1)  # batch edge_num
+        #print(preds_bond)
 
         optimizer.zero_grad()
         loss = criterion(preds.view(-1, 4), labels.view(-1))
@@ -295,22 +324,32 @@ def evaluate11(model, epoch, num):
     accs = []
     with torch.no_grad():
         for i in range(0, len(num), batch_size):
+            #print("Eval", i)
+            start_time = time.time()
             seq_len = min(batch_size, len(num) - i)
             src = getInput11(vertex_data[i:i + seq_len], msp_arr_data[i:i + seq_len])
-            #labels = getLabel(mol_adj_data[i:i + seq_len], vertex_data[i:i + seq_len])
+            #print("1. getinput11 time", time.time()-start_time)
+            labels = getLabel(mol_adj_data[i:i + seq_len], vertex_data[i:i + seq_len])
             labels_graph = mol_adj_data[i:i + seq_len]
+            #print(labels_graph)
+            #print(labels_graph.shape)
             preds = model(src)  # batch, 3, 4
+            #print("2. model(src)", time.time()-start_time)
             preds_bond = torch.argmax(preds, dim=-1)  # batch 3
 
-            #loss = criterion(preds.contiguous().view(-1, 4), labels.view(-1))
-            atom_lists = getInput.find_permutation(vertex_data[i])
-            losses = []
-            for al in atom_lists:
-                new_E = getInput.getGraph(labels_graph[0], al)
-                labels = getLabel([new_E], vertex_data[i:i + seq_len])
-                loss = criterion(preds.view(-1, 4), labels.view(-1))
-                losses.append(loss)
-            loss = min(losses)
+            loss = criterion(preds.contiguous().view(-1, 4), labels.view(-1))
+            #print(vertex_data[i])
+            #atom_lists = getInput.find_permutation(vertex_data[i])
+            #print(atom_lists)
+            #print("3. getInput.find_permu", time.time()-start_time)
+            #losses = []
+            #for al in atom_lists:
+                #new_E = getInput.getGraph(labels_graph[0], al)
+                #labels = getLabel([new_E], vertex_data[i:i + seq_len])
+                #loss = criterion(preds.view(-1, 4), labels.view(-1))
+                #losses.append(loss)
+            #print("4. al in atom_lists time", time.time()-start_time)
+            #loss = min(losses)
             total_loss += round(loss.item(), 4)
             acc, preds_graph = accuracy(preds_bond, labels_graph, vertex_data[i:i + seq_len])
             accs += acc
@@ -656,17 +695,25 @@ def plot_result(epoch):
     plt.ylabel('Loss')
     plt.legend(loc='best')
     plt.show()
+    
 def train_transformer(epoch, num):
     for i in range(1, 1 + epoch):
+        cur_time = time.time()
         train11(model, i, num)
+        print("TrainTime",time.time() - cur_time)
+        cur_time = time.time()
+        torch.save(model.state_dict(),'model_type11.pkl')
         evaluate11(model, i, range(1500, 1700))
+        print("EvalTime",time.time() - cur_time)
+        cur_time = time.time()
         test11(model, i, range(1700, 1800))
+        print("TestTime",time.time() - cur_time)
     torch.save(model.state_dict(),'model_type11.pkl')
     plot_result(epoch)
 
 train_acc_list, tran_loss_list, valid_acc_list, valid_loss_list, test_acc_list, test_loss_list = [],[],[],[], [], []
-#train_transformer(200,num=range(1500))
+train_transformer(200,num=range(1500))
 
 # #Testing
-model.load_state_dict(torch.load('model_type11.pkl'))
-evaluate11(model,1,range(16))
+#model.load_state_dict(torch.load('type11_1epoch.pkl'))
+#evaluate11(model,1,range(1339,1340))
