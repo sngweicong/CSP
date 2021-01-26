@@ -9,7 +9,7 @@ atom_mass = [12,1,16,14]
 atom_weight = [4,1,2,3]
 atom_valence = [[0,0,0,1],[1,0,0,0],[0,1,0,0],[0,0,1,0]]
 max_atoms = 13
-output_num = 4
+output_num = 3
 negative_num = -100000000
 
 max_edge = [4,1,2,3]
