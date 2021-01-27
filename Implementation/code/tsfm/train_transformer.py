@@ -89,7 +89,7 @@ class Classify11(nn.Module):
         self.dropout2 = nn.Dropout(0.2)
 
     def forward(self, src):
-        firstmask = get_pad_mask11(src).bool().cuda()  # [batch, edge_num,4]
+        #firstmask = get_pad_mask11(src).bool().cuda()  # [batch, edge_num,4]
         mask = get_pad_mask(src, self.padding_idx).view(src.size(0), -1).unsqueeze(-1)
         #print(mask)
         output = self.embedding(src)  # [batch, k, d_model=512]
@@ -100,7 +100,7 @@ class Classify11(nn.Module):
         #
         output = output.permute(0, 2, 1)  # [batch, edge_num, max_len2]
         output = self.ll2(output)  # [batch, edge_num, 4]
-        output = output.masked_fill(firstmask,-1e9)
+        #output = output.masked_fill(firstmask,-1e9)
         output = F.log_softmax(output, dim=-1)
         return output  # [batch, edge_num=3, bond=4]
 # transformer with edge pos
@@ -309,8 +309,10 @@ def train11(model, epoch, num):
         total_loss += loss.item()
         acc, preds_graph = accuracy(preds_bond, labels_graph, vertex_data[i:i + seq_len])
         accs += acc
-        if (epoch - 1) % 50 == 0 and i == 0:
+        if (epoch - 1) % 10 == 1 and i == 0:
             print(labels_graph[0])
+            print(preds)
+            print(preds_bond)
             print(preds_graph[0])
     print("epoch:", epoch)
     print("train mean_loss: ", round(total_loss / len(num), 4))
@@ -715,7 +717,7 @@ def train_transformer(epoch, num):
     plot_result(epoch)
 
 train_acc_list, tran_loss_list, valid_acc_list, valid_loss_list, test_acc_list, test_loss_list = [],[],[],[], [], []
-train_transformer(200,num=range(1500))
+train_transformer(500,num=range(1500))
 
 # #Testing
 #model.load_state_dict(torch.load('type11_1epoch.pkl'))
