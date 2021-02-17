@@ -10,6 +10,7 @@ from Embed import PositionalEncoder
 import matplotlib.pyplot as plt
 import getInput as getInput
 import time
+import sys
 
 vertex_arr = np.load("../tsfm/vertex_arr_CHON.npy", allow_pickle=True) #1843
 mol_adj_arr = np.load("../tsfm/mol_adj_CHON.npy", allow_pickle=True)
@@ -26,11 +27,12 @@ atomic_number = [[1, 0, 0], [0, 0, 0], [0, 1, 0], [0, 0, 1]]  # [C, H, O, N}
 bond_number = [4, 1, 2]  # [C, H, O]
 default_valence = [[1, 1, 1], [1, 0, 0], [1, 1, 0], [1, 1, 1]]
 MSP_THRESHOLD = 100
+n_top_msp = 16
 
 edge_num = 78  # 3#29*15#78 #3
 d_model = 256
 max_atoms = 13  # 3
-max_len11 = 15 * edge_num + 16
+max_len11 = edge_num + 16
 max_len12 = 2 * edge_num + k
 
 def getEdgeIdx(pos1, pos2=None):  # not contain H
@@ -56,7 +58,8 @@ class Classify11(nn.Module):
         self.debug_explode_count = 0
         self.N = 1
         self.padding_idx = padding_idx
-        self.embedding = nn.Embedding(msp_len, d_model, self.padding_idx)
+        self.msp_embedding = nn.Embedding(msp_len, d_model, self.padding_idx)
+        self.edges_embedding = nn.Embedding(msp_len, d_model, self.padding_idx)
         self.layers = get_clones(EncoderLayer(d_model, heads, dropout), self.N)
         self.norm = Norm(d_model)
         self.ll1 = nn.Linear(d_model, edge_num)
@@ -64,11 +67,14 @@ class Classify11(nn.Module):
         self.dropout1 = nn.Dropout(0.2)
         self.dropout2 = nn.Dropout(0.2)
 
-    def forward(self, src):
+    def forward(self, msp, edges):
         #firstmask = get_pad_mask11(src).bool().cuda()  # [batch, edge_num,4]
-        mask = get_pad_mask(src, self.padding_idx).view(src.size(0), -1).unsqueeze(-1)
+        temp_concat = torch.cat((msp,edges),1)
+        mask = get_pad_mask(temp_concat, self.padding_idx).view(temp_concat.size(0), -1).unsqueeze(-1)
         #print(mask)
-        output = self.embedding(src)  # [batch, k, d_model=512]
+        output_msp = self.msp_embedding(msp)  # [batch, k, d_model=512]
+        output_edges = self.edges_embedding(edges)
+        output = torch.cat((output_msp,output_edges),1)
         for i in range(self.N):
             output = self.layers[i](output, mask)
         output = self.ll1(output)  # [batch, max_len2, edge_num]
@@ -77,6 +83,103 @@ class Classify11(nn.Module):
         output = output.permute(0, 2, 1)  # [batch, edge_num, max_len2]
         output = self.ll2(output)  # [batch, edge_num, 4]
         #output = output.masked_fill(firstmask,-1e9)
+        output2 = F.log_softmax(output, dim=-1)
+        if torch.sum(output2) < -5000 and self.debug_explode_count < 20:
+            print("EXPLODED MODEL", self.debug_explode_count)
+            print(torch.sum(output2))
+            print(output2)
+            self.debug_explode_count += 1
+            print(output)
+        return output2  # [batch, edge_num=3, bond=4]
+
+class ClassifyBaseline(nn.Module):
+    def __init__(self, padding_idx):
+        super().__init__()
+        heads = 4
+        self.debug_explode_count = 0
+        self.N = 1
+        self.padding_idx = padding_idx
+        self.msp_embedding = nn.Embedding(msp_len, d_model, self.padding_idx)
+        self.edge_embedding = nn.Embedding(msp_len, d_model, self.padding_idx)
+        self.layers_msp = get_clones(EncoderLayer(d_model, heads, dropout), self.N)
+        self.layers_edge = get_clones(EncoderLayer(d_model, heads, dropout), self.N)
+        self.norm = Norm(d_model)
+        self.ll1_msp = nn.Linear(d_model, 16)
+        self.ll1_edge = nn.Linear(d_model, 32)
+        self.ll2_edge = nn.Linear(32, 4)
+        self.ll1_comb = nn.Linear(288, 4)
+        self.dropout1 = nn.Dropout(0.2)
+        self.dropout2 = nn.Dropout(0.2)
+        self.sum2row_matrix = torch.zeros(edge_num,edge_num*2).cuda()
+        for i in range(edge_num):
+            self.sum2row_matrix[i,2*i] = 0.5
+            self.sum2row_matrix[i,2*i+1] = 0.5
+
+    def forward(self, msp, edge):
+        #firstmask = get_pad_mask11(src).bool().cuda()  # [batch, edge_num,4]
+        #print(edge)
+        mask_edge = get_pad_mask(edge, self.padding_idx).view(edge.size(0), -1).unsqueeze(-1)
+        #print('mask',mask_edge.shape)
+        output_edge = self.edge_embedding(edge)  # [batch, k, d_model=512]
+        #print('op edge', output_edge)
+
+        #combine step
+        '''
+        reduce_mask = torch.BoolTensor([True,False]*edge_num).unsqueeze(-1).unsqueeze(0)
+        mask_edge = mask_edge[reduce_mask].unsqueeze(-1).unsqueeze(0)
+        #print('mask2',mask_edge)
+        print("pretmean", torch.mean(output_edge,2))
+        print("pretsd", torch.std(output_edge,2))
+        output_edge = torch.matmul(self.sum2row_matrix, output_edge)
+        print("tmean", torch.mean(output_edge,2))
+        print("tsd", torch.std(output_edge,2))
+        '''
+
+        #print('edge-1',output_edge.shape)
+        for i in range(self.N):
+            output_edge = self.layers_edge[i](output_edge, mask_edge)
+
+        mask_msp = get_pad_mask(msp, self.padding_idx).view(msp.size(0), -1).unsqueeze(-1)
+        #print(mask)
+        output_msp = self.msp_embedding(msp)  # [batch, k, d_model=512]
+        for i in range(self.N):
+            output_msp = self.layers_msp[i](output_msp, mask_msp)
+
+        #print('edge',output_edge.shape)
+        #print('msp',output_msp.shape)
+        #output_msp = self.ll1_msp(output_msp)
+        #print('msp2',output_msp.shape)
+        
+        #print('edge2',output_edge.shape)
+        output_edge = self.ll1_edge(output_edge)
+        #print('edge3',output_edge.shape)
+        #output_msp = torch.flatten(output_msp,start_dim=1)
+        #output_msp = torch.repeat_interleave(output_msp.unsqueeze(0),edge_num,dim=1)
+        #print('msp3',output_msp.shape)
+        #output = torch.cat((output_msp,output_edge),2)
+        #print('comb', output.shape)
+        #output = self.ll1_comb(output)
+        output = self.ll2_edge(output_edge)
+        #print('comb2', output.shape)
+        '''
+        output_comb = torch.cat((output_msp,output_edge),1)
+        print('comb',output_comb.shape)
+
+        output = self.ll1_comb(output_comb)  # [batch, max_len2, edge_num]
+        #output = self.dropout1(output)
+        print('preperm',output.shape)
+        output = output.permute(0, 2, 1)  # [batch, edge_num, max_len2]
+        print('postperm',output.shape)
+        output = self.ll2_comb(output)  # [batch, edge_num, 4]
+        print('postll2',output.shape)
+        '''
+        #output = output.masked_fill(firstmask,-1e9)
+        #edge torch.Size([1, 156, 256])
+        #msp torch.Size([1, 16, 256])
+        #comb torch.Size([1, 172, 256])
+        #preperm torch.Size([1, 172, 78])
+        #postperm torch.Size([1, 78, 172])
+        #postll2 torch.Size([1, 78, 4])
         output2 = F.log_softmax(output, dim=-1)
         if torch.sum(output2) < -5000 and self.debug_explode_count < 20:
             print("EXPLODED MODEL", self.debug_explode_count)
@@ -115,7 +218,50 @@ def getInput11(vertex, msp):
         #         idx += 1
         #         if idx == max_len11: break
         #print('after',src[b,15 * edge_num:])
+    #print(src.shape)
     return src
+
+def getInputLite(vertex, msp):
+    edges = torch.LongTensor([[padding_idx] * 2 * edge_num] * len(vertex))
+    top16msp = torch.LongTensor([[padding_idx] * 16] * len(vertex))
+    for b in range(len(vertex)):
+        idx = 0
+        for i in range(max_atoms):
+            for ii in range(i + 1, max_atoms):
+                if i < len(vertex[b]) and ii < len(vertex[b]):
+                    #print(i,ii,idx1)
+                    #print("first",src[b, idx1 * 15: idx1 * 15 + 15])
+                    edges[b, idx * 2], edges[b, idx * 2 + 1] = atom_mass[int(vertex[b][i])], atom_mass[int(vertex[b][ii])]
+                idx += 1
+        #MSP part
+        top16_unfiltered = (-msp[b]).argsort()[:16]
+        more_than_10_bool = (msp[b]>= MSP_THRESHOLD)
+        end_idx = min(15,np.sum(more_than_10_bool))
+        top16msp[b,:end_idx] = torch.Tensor(top16_unfiltered[:end_idx])
+    #print(edges.shape) # 1 156
+    #print(top16msp.shape) # 1 16 
+    return top16msp, edges
+
+def getInputLite1Edge(vertex, msp):
+    edges = torch.LongTensor([[padding_idx] * edge_num] * len(vertex))
+    top16msp = torch.LongTensor([[padding_idx] * 16] * len(vertex))
+    for b in range(len(vertex)):
+        idx = 0
+        for i in range(max_atoms):
+            for ii in range(i + 1, max_atoms):
+                if i < len(vertex[b]) and ii < len(vertex[b]):
+                    #print(i,ii,idx1)
+                    #print("first",src[b, idx1 * 15: idx1 * 15 + 15])
+                    edges[b, idx] = atom_mass[int(vertex[b][i])] + atom_mass[int(vertex[b][ii])]
+                idx += 1
+        #MSP part
+        top16_unfiltered = (-msp[b]).argsort()[:16]
+        more_than_10_bool = (msp[b]>= MSP_THRESHOLD)
+        end_idx = min(15,np.sum(more_than_10_bool))
+        top16msp[b,:end_idx] = torch.Tensor(top16_unfiltered[:end_idx])
+    #print(edges.shape) # 1 156
+    #print(top16msp.shape) # 1 16 
+    return top16msp, edges
 
 def getLabel(mol_arr, vertex):
     # label = torch.zeros((len(mol_arr),edge_num),dtype=torch.long) #[batch, edge_num]
@@ -189,20 +335,20 @@ def train11(model, epoch, num):
         #print('seq_len', seq_len)
         #print('vertex_data', vertex_data[i:i + seq_len])
         #print('msp_arr', msp_arr_data[i:i + seq_len])
-        src = getInput11(vertex_data[i:i + seq_len], msp_arr_data[i:i + seq_len]).cuda()
-        #print('src',src)
+        msp, edges = getInputLite1Edge(vertex_data[i:i + seq_len], msp_arr_data[i:i + seq_len])
+        msp = msp.cuda()
+        edges = edges.cuda()
         labels = getLabel(mol_adj_data[i:i + seq_len], vertex_data[i:i + seq_len]).cuda()
         #print('labels',labels)
         labels_graph = mol_adj_data[i:i + seq_len]
         #print('labels_graph',labels_graph)
-        preds = model(src)  # batch, edge_num, 4
-        #print(preds)
+        preds = model(msp,edges)  # batch, edge_num, 4
+        #print('Preds',preds)
         preds_bond = torch.argmax(preds, dim=-1)  # batch edge_num
         #print(preds_bond)
 
         optimizer.zero_grad()
         loss = criterion(preds.view(-1, 4), labels.view(-1))
-        
         if torch.sum(torch.isnan(loss)) > 0 and not_nan:
             not_nan = False
             print("Exploded")
@@ -246,13 +392,15 @@ def evaluate11(model, epoch, num):
             #print("Eval", i)
             start_time = time.time()
             seq_len = min(batch_size, len(num) - i)
-            src = getInput11(vertex_data[i:i + seq_len], msp_arr_data[i:i + seq_len]).cuda()
+            msp, edges = getInputLite1Edge(vertex_data[i:i + seq_len], msp_arr_data[i:i + seq_len])
+            msp = msp.cuda()
+            edges = edges.cuda()
             #print("1. getinput11 time", time.time()-start_time)
             labels = getLabel(mol_adj_data[i:i + seq_len], vertex_data[i:i + seq_len]).cuda()
             labels_graph = mol_adj_data[i:i + seq_len]
             #print(labels_graph)
             #print(labels_graph.shape)
-            preds = model(src)  # batch, 3, 4
+            preds = model(msp,edges)  # batch, 3, 4
             #print("2. model(src)", time.time()-start_time)
             preds_bond = torch.argmax(preds, dim=-1)  # batch 3
 
@@ -289,12 +437,14 @@ def test11(model, epoch, num):
     with torch.no_grad():
         for i in range(0, len(num), batch_size):
             seq_len = min(batch_size, len(num) - i)
-            src = getInput11(vertex_data[i:i + seq_len], msp_arr_data[i:i + seq_len]).cuda()
+            msp, edge = getInputLite1Edge(vertex_data[i:i + seq_len], msp_arr_data[i:i + seq_len])
+            msp = msp.cuda()
+            edge = edge.cuda()
             #print('----------------')
             #print(vertex_data[i:i + seq_len])
             labels = getLabel(mol_adj_data[i:i + seq_len], vertex_data[i:i + seq_len]).cuda()
             labels_graph = mol_adj_data[i:i + seq_len]
-            preds = model(src)  # batch, 3, 4
+            preds = model(msp, edge)  # batch, 3, 4
             preds_bond = torch.argmax(preds, dim=-1)  # batch 3
 
             loss = criterion(preds.contiguous().view(-1, 4), labels.view(-1))
@@ -337,9 +487,11 @@ def train_transformer(epoch, num):
         #torch.save(model.state_dict(),'model_type11.pkl')
         evaluate11(model, i, range(3000, 3200))
         print("EvalTime",time.time() - cur_time)
+        '''
         cur_time = time.time()
         test11(model, i, range(3200, 3380))
         print("TestTime",time.time() - cur_time)
+        '''
         #print(model)
         norm_list = []
         for p in model.parameters():
@@ -351,14 +503,16 @@ def train_transformer(epoch, num):
     plot_result(epoch)
 
 model = Classify11(padding_idx)
-torch.cuda.set_device(0)
+#model = ClassifyBaseline(padding_idx)
+torch.cuda.set_device(int(sys.argv[1]))
 model.cuda()
-#optimizer = optim.SGD(model.parameters(), lr=0.01, momentum=0.9)
-optimizer = optim.Adam(model.parameters(), lr=0.001, betas=(0.9, 0.999), eps=1e-08, weight_decay=0, amsgrad=False)
+optimizer = optim.SGD(model.parameters(), lr=0.001, momentum=0.9)
+#optimizer = optim.Adam(model.parameters(), lr=0.001, betas=(0.9, 0.999), eps=1e-08, weight_decay=0, amsgrad=False)
 criterion = nn.NLLLoss(ignore_index=padding_idx)  # CrossEntropyLoss()
 
 train_acc_list, tran_loss_list, valid_acc_list, valid_loss_list, test_acc_list, test_loss_list = [],[],[],[], [], []
 train_transformer(500,num=range(3000))
+#train11(model, 1, range(5))
 
 # #Testing
 #model.load_state_dict(torch.load('type11_1epoch.pkl'))
