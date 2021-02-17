@@ -12,9 +12,13 @@ import getInput as getInput
 import time
 import sys
 
-vertex_arr = np.load("../tsfm/vertex_arr_CHON.npy", allow_pickle=True) #1843
-mol_adj_arr = np.load("../tsfm/mol_adj_CHON.npy", allow_pickle=True)
-msp_arr = np.load("../tsfm/msp_arr_CHON.npy", allow_pickle=True)
+#vertex_arr = np.load("../tsfm/vertex_arr_CHON.npy", allow_pickle=True) #1843
+#mol_adj_arr = np.load("../tsfm/mol_adj_CHON.npy", allow_pickle=True)
+#msp_arr = np.load("../tsfm/msp_arr_CHON.npy", allow_pickle=True)
+
+vertex_arr = np.load("../tsfm/vertex_arr_test.npy", allow_pickle=True) #1843
+mol_adj_arr = np.load("../tsfm/mol_adj_arr_test.npy", allow_pickle=True)
+msp_arr = np.load("../tsfm/msp_arr_sort_per.npy", allow_pickle=True)
 
 msp_len = 800
 k = 20
@@ -23,6 +27,14 @@ padding_idx = 799  # must > 0 and < msp_len
 dropout = 0.2
 batch_size = 1
 atom_mass = [12, 1, 16, 14]  # [12,1,16]
+
+dict_atom = dict([ (atom_mass[i],i) for i in range(len(atom_mass))])
+embed_idx_grid = torch.LongTensor([range(len(atom_mass)**2)]).reshape(len(atom_mass),len(atom_mass))
+for i in range(1,len(atom_mass)):
+    for j in range(i):
+        embed_idx_grid[i,j] = embed_idx_grid[j,i]
+#print(embed_idx_grid)
+
 atomic_number = [[1, 0, 0], [0, 0, 0], [0, 1, 0], [0, 0, 1]]  # [C, H, O, N}
 bond_number = [4, 1, 2]  # [C, H, O]
 default_valence = [[1, 1, 1], [1, 0, 0], [1, 1, 0], [1, 1, 1]]
@@ -34,6 +46,13 @@ d_model = 256
 max_atoms = 13  # 3
 max_len11 = edge_num + 16
 max_len12 = 2 * edge_num + k
+
+def get_atom_atom_embedding_idx(atom_mass_1,atom_mass_2):
+    return embed_idx_grid[dict_atom[atom_mass_1], dict_atom[atom_mass_2]]
+
+#for testing
+#print(get_atom_atom_embedding_idx(12,14))
+#print(get_atom_atom_embedding_idx(16,16))
 
 def getEdgeIdx(pos1, pos2=None):  # not contain H
     edge_idx = 0
@@ -75,13 +94,25 @@ class Classify11(nn.Module):
         output_msp = self.msp_embedding(msp)  # [batch, k, d_model=512]
         output_edges = self.edges_embedding(edges)
         output = torch.cat((output_msp,output_edges),1)
+        #print('1', output.shape)
         for i in range(self.N):
             output = self.layers[i](output, mask)
+        #print('2', output.shape)
         output = self.ll1(output)  # [batch, max_len2, edge_num]
+        #print('3', output.shape)
         #output = self.dropout1(output)
         #
         output = output.permute(0, 2, 1)  # [batch, edge_num, max_len2]
+        #print('4', output.shape)
         output = self.ll2(output)  # [batch, edge_num, 4]
+        #print('5', output.shape)
+        '''
+        1 torch.Size([1, 94, 256])
+        2 torch.Size([1, 94, 256])
+        3 torch.Size([1, 94, 78])
+        4 torch.Size([1, 78, 94])
+        5 torch.Size([1, 78, 4])
+        '''
         #output = output.masked_fill(firstmask,-1e9)
         output2 = F.log_softmax(output, dim=-1)
         if torch.sum(output2) < -5000 and self.debug_explode_count < 20:
@@ -252,7 +283,8 @@ def getInputLite1Edge(vertex, msp):
                 if i < len(vertex[b]) and ii < len(vertex[b]):
                     #print(i,ii,idx1)
                     #print("first",src[b, idx1 * 15: idx1 * 15 + 15])
-                    edges[b, idx] = atom_mass[int(vertex[b][i])] + atom_mass[int(vertex[b][ii])]
+                    #OLD edges[b, idx] = atom_mass[int(vertex[b][i])] + atom_mass[int(vertex[b][ii])]
+                    edges[b, idx] = get_atom_atom_embedding_idx(atom_mass[int(vertex[b][i])], atom_mass[int(vertex[b][ii])])
                 idx += 1
         #MSP part
         top16_unfiltered = (-msp[b]).argsort()[:16]
@@ -437,14 +469,14 @@ def test11(model, epoch, num):
     with torch.no_grad():
         for i in range(0, len(num), batch_size):
             seq_len = min(batch_size, len(num) - i)
-            msp, edge = getInputLite1Edge(vertex_data[i:i + seq_len], msp_arr_data[i:i + seq_len])
+            msp, edges = getInputLite1Edge(vertex_data[i:i + seq_len], msp_arr_data[i:i + seq_len])
             msp = msp.cuda()
-            edge = edge.cuda()
+            edges = edges.cuda()
             #print('----------------')
             #print(vertex_data[i:i + seq_len])
             labels = getLabel(mol_adj_data[i:i + seq_len], vertex_data[i:i + seq_len]).cuda()
             labels_graph = mol_adj_data[i:i + seq_len]
-            preds = model(msp, edge)  # batch, 3, 4
+            preds = model(msp, edges)  # batch, 3, 4
             preds_bond = torch.argmax(preds, dim=-1)  # batch 3
 
             loss = criterion(preds.contiguous().view(-1, 4), labels.view(-1))
@@ -484,14 +516,11 @@ def train_transformer(epoch, num):
         train11(model, i, num)
         print("TrainTime",time.time() - cur_time)
         cur_time = time.time()
-        #torch.save(model.state_dict(),'model_type11.pkl')
-        evaluate11(model, i, range(3000, 3200))
+        evaluate11(model, i, range(1500, 1700))
         print("EvalTime",time.time() - cur_time)
-        '''
         cur_time = time.time()
-        test11(model, i, range(3200, 3380))
+        test11(model, i, range(1700, 1800))
         print("TestTime",time.time() - cur_time)
-        '''
         #print(model)
         norm_list = []
         for p in model.parameters():
@@ -511,7 +540,7 @@ optimizer = optim.SGD(model.parameters(), lr=0.001, momentum=0.9)
 criterion = nn.NLLLoss(ignore_index=padding_idx)  # CrossEntropyLoss()
 
 train_acc_list, tran_loss_list, valid_acc_list, valid_loss_list, test_acc_list, test_loss_list = [],[],[],[], [], []
-train_transformer(500,num=range(3000))
+train_transformer(500,num=range(1500))
 #train11(model, 1, range(5))
 
 # #Testing
