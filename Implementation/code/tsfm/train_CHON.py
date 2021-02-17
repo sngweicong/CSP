@@ -88,6 +88,10 @@ class Classify11(nn.Module):
 
     def forward(self, msp, edges):
         #firstmask = get_pad_mask11(src).bool().cuda()  # [batch, edge_num,4]
+        #mask some modality
+        #msp[:] = self.padding_idx
+        #edges[:] = self.padding_idx
+        #end mask
         temp_concat = torch.cat((msp,edges),1)
         mask = get_pad_mask(temp_concat, self.padding_idx).view(temp_concat.size(0), -1).unsqueeze(-1)
         #print(mask)
@@ -122,156 +126,6 @@ class Classify11(nn.Module):
             self.debug_explode_count += 1
             print(output)
         return output2  # [batch, edge_num=3, bond=4]
-
-class ClassifyBaseline(nn.Module):
-    def __init__(self, padding_idx):
-        super().__init__()
-        heads = 4
-        self.debug_explode_count = 0
-        self.N = 1
-        self.padding_idx = padding_idx
-        self.msp_embedding = nn.Embedding(msp_len, d_model, self.padding_idx)
-        self.edge_embedding = nn.Embedding(msp_len, d_model, self.padding_idx)
-        self.layers_msp = get_clones(EncoderLayer(d_model, heads, dropout), self.N)
-        self.layers_edge = get_clones(EncoderLayer(d_model, heads, dropout), self.N)
-        self.norm = Norm(d_model)
-        self.ll1_msp = nn.Linear(d_model, 16)
-        self.ll1_edge = nn.Linear(d_model, 32)
-        self.ll2_edge = nn.Linear(32, 4)
-        self.ll1_comb = nn.Linear(288, 4)
-        self.dropout1 = nn.Dropout(0.2)
-        self.dropout2 = nn.Dropout(0.2)
-        self.sum2row_matrix = torch.zeros(edge_num,edge_num*2).cuda()
-        for i in range(edge_num):
-            self.sum2row_matrix[i,2*i] = 0.5
-            self.sum2row_matrix[i,2*i+1] = 0.5
-
-    def forward(self, msp, edge):
-        #firstmask = get_pad_mask11(src).bool().cuda()  # [batch, edge_num,4]
-        #print(edge)
-        mask_edge = get_pad_mask(edge, self.padding_idx).view(edge.size(0), -1).unsqueeze(-1)
-        #print('mask',mask_edge.shape)
-        output_edge = self.edge_embedding(edge)  # [batch, k, d_model=512]
-        #print('op edge', output_edge)
-
-        #combine step
-        '''
-        reduce_mask = torch.BoolTensor([True,False]*edge_num).unsqueeze(-1).unsqueeze(0)
-        mask_edge = mask_edge[reduce_mask].unsqueeze(-1).unsqueeze(0)
-        #print('mask2',mask_edge)
-        print("pretmean", torch.mean(output_edge,2))
-        print("pretsd", torch.std(output_edge,2))
-        output_edge = torch.matmul(self.sum2row_matrix, output_edge)
-        print("tmean", torch.mean(output_edge,2))
-        print("tsd", torch.std(output_edge,2))
-        '''
-
-        #print('edge-1',output_edge.shape)
-        for i in range(self.N):
-            output_edge = self.layers_edge[i](output_edge, mask_edge)
-
-        mask_msp = get_pad_mask(msp, self.padding_idx).view(msp.size(0), -1).unsqueeze(-1)
-        #print(mask)
-        output_msp = self.msp_embedding(msp)  # [batch, k, d_model=512]
-        for i in range(self.N):
-            output_msp = self.layers_msp[i](output_msp, mask_msp)
-
-        #print('edge',output_edge.shape)
-        #print('msp',output_msp.shape)
-        #output_msp = self.ll1_msp(output_msp)
-        #print('msp2',output_msp.shape)
-        
-        #print('edge2',output_edge.shape)
-        output_edge = self.ll1_edge(output_edge)
-        #print('edge3',output_edge.shape)
-        #output_msp = torch.flatten(output_msp,start_dim=1)
-        #output_msp = torch.repeat_interleave(output_msp.unsqueeze(0),edge_num,dim=1)
-        #print('msp3',output_msp.shape)
-        #output = torch.cat((output_msp,output_edge),2)
-        #print('comb', output.shape)
-        #output = self.ll1_comb(output)
-        output = self.ll2_edge(output_edge)
-        #print('comb2', output.shape)
-        '''
-        output_comb = torch.cat((output_msp,output_edge),1)
-        print('comb',output_comb.shape)
-
-        output = self.ll1_comb(output_comb)  # [batch, max_len2, edge_num]
-        #output = self.dropout1(output)
-        print('preperm',output.shape)
-        output = output.permute(0, 2, 1)  # [batch, edge_num, max_len2]
-        print('postperm',output.shape)
-        output = self.ll2_comb(output)  # [batch, edge_num, 4]
-        print('postll2',output.shape)
-        '''
-        #output = output.masked_fill(firstmask,-1e9)
-        #edge torch.Size([1, 156, 256])
-        #msp torch.Size([1, 16, 256])
-        #comb torch.Size([1, 172, 256])
-        #preperm torch.Size([1, 172, 78])
-        #postperm torch.Size([1, 78, 172])
-        #postll2 torch.Size([1, 78, 4])
-        output2 = F.log_softmax(output, dim=-1)
-        if torch.sum(output2) < -5000 and self.debug_explode_count < 20:
-            print("EXPLODED MODEL", self.debug_explode_count)
-            print(torch.sum(output2))
-            print(output2)
-            self.debug_explode_count += 1
-            print(output)
-        return output2  # [batch, edge_num=3, bond=4]
-
-def getInput11(vertex, msp):
-    # [A1-weight, A2-weight, 1 1 0,A1, A3,1 1 1  A2, A3,1 0 0 msp1[x], ...,mspk[x]] 45 = k + edge_num* *
-    src = torch.LongTensor([[padding_idx] * max_len11] * len(vertex))  # [batch, 45]
-    for b in range(len(vertex)):
-        idx1 = 0
-        for i in range(max_atoms):
-            for ii in range(i + 1, max_atoms):
-                if i < len(vertex[b]) and ii < len(vertex[b]):
-                    #print(i,ii,idx1)
-                    #print("first",src[b, idx1 * 15: idx1 * 15 + 15])
-                    src[b, idx1 * 15], src[b, idx1 * 15 + 1] = atom_mass[int(vertex[b][i])], atom_mass[int(vertex[b][ii])]
-                    #print("second",src[b, idx1 * 15: idx1 * 15 + 15])
-                    src[b, idx1 * 15 + 2: idx1 * 15 + 2 + len(vertex[b])] = torch.LongTensor([int(jj==i or jj==ii) for jj in range(len(vertex[b]))])
-                    #print("third",src[b, idx1 * 15: idx1 * 15 + 15])
-                idx1 += 1
-        idx = 15 * edge_num
-        #print('before',src[b,15 * edge_num:])
-        #print(msp[b])
-        top16_unfiltered = (-msp[b]).argsort()[:16]
-        more_than_10_bool = (msp[b]>= MSP_THRESHOLD)
-        end_idx = min(15,np.sum(more_than_10_bool))
-        src[b,15 * edge_num: 15*edge_num+end_idx] = torch.Tensor(top16_unfiltered[:end_idx])
-        #print(src[b,15 * edge_num:])
-        # for j in range(1, len(msp[b]) - 1):
-        #     if msp[b][j - 1] < msp[b][j] and msp[b][j + 1] < msp[b][j]:
-        #         src[b, idx] = j
-        #         idx += 1
-        #         if idx == max_len11: break
-        #print('after',src[b,15 * edge_num:])
-    #print(src.shape)
-    return src
-
-def getInputLite(vertex, msp):
-    edges = torch.LongTensor([[padding_idx] * 2 * edge_num] * len(vertex))
-    top16msp = torch.LongTensor([[padding_idx] * 16] * len(vertex))
-    for b in range(len(vertex)):
-        idx = 0
-        for i in range(max_atoms):
-            for ii in range(i + 1, max_atoms):
-                if i < len(vertex[b]) and ii < len(vertex[b]):
-                    #print(i,ii,idx1)
-                    #print("first",src[b, idx1 * 15: idx1 * 15 + 15])
-                    edges[b, idx * 2], edges[b, idx * 2 + 1] = atom_mass[int(vertex[b][i])], atom_mass[int(vertex[b][ii])]
-                idx += 1
-        #MSP part
-        top16_unfiltered = (-msp[b]).argsort()[:16]
-        more_than_10_bool = (msp[b]>= MSP_THRESHOLD)
-        end_idx = min(15,np.sum(more_than_10_bool))
-        top16msp[b,:end_idx] = torch.Tensor(top16_unfiltered[:end_idx])
-    #print(edges.shape) # 1 156
-    #print(top16msp.shape) # 1 16 
-    return top16msp, edges
 
 def getInputLite1Edge(vertex, msp):
     edges = torch.LongTensor([[padding_idx] * edge_num] * len(vertex))
@@ -532,7 +386,6 @@ def train_transformer(epoch, num):
     plot_result(epoch)
 
 model = Classify11(padding_idx)
-#model = ClassifyBaseline(padding_idx)
 torch.cuda.set_device(int(sys.argv[1]))
 model.cuda()
 optimizer = optim.SGD(model.parameters(), lr=0.001, momentum=0.9)
