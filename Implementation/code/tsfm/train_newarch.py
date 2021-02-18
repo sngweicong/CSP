@@ -87,6 +87,7 @@ class Classify11(nn.Module):
         self.ll_msp = nn.Linear(d_model, 78)
         self.dropout1 = nn.Dropout(0.2)
         self.dropout2 = nn.Dropout(0.2)
+        self.bn =  torch.nn.BatchNorm1d(256)
 
     def forward(self, msp, edges):
         #firstmask = get_pad_mask11(src).bool().cuda()  # [batch, edge_num,4]
@@ -104,6 +105,7 @@ class Classify11(nn.Module):
         for i in range(self.N):
             output = self.layers[i](output, mask)
         #print('2', output.shape) 94 256
+        #output = self.bn(output.squeeze(0)).unsqueeze(0) # extra bn line, for gradients.
         msp_part = output[:,:16,:].squeeze(0)
         edges_part = output[:,16:,:].squeeze(0)
         msp_part = self.ll_msp(msp_part).transpose(0,1)
